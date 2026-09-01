@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Called by release.yml so a tag can never be published without a green build.
+  workflow_call:
+
+# A new push to the same branch/PR supersedes the run in flight - except on
+# main, where every commit keeps its own result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18.17 is the floor declared in package.json `engines`; 24 is current LTS.
+        node: ["18.17", "20", "22", "24"]
+        os: [ubuntu-latest]
+        include:
+          # One Windows leg to catch path handling in the build, not a full matrix.
+          - node: "22"
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `next` is a devDependency that wants Node >= 20.9, so the 18.17 leg logs
+      # an EBADENGINE warning. engine-strict is off by default, and the library
+      # itself supports 18.17 - that is what this leg is here to prove.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  package:
+    name: Verify publishable tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Pack
+        run: npm pack --pack-destination=. 2>&1 | tee pack.log
+
+      - name: Assert the tarball ships both entry points
+        run: |
+          tarball="$(ls -1 *.tgz | head -n 1)"
+          echo "Inspecting $tarball"
+          tar -tzf "$tarball" | sort | tee contents.txt
+
+          # tsup's default naming for a package without "type": "module":
+          # CJS is *.js, ESM is *.mjs. These must match package.json `exports`.
+          missing=0
+          for file in \
+            package/dist/index.js \
+            package/dist/index.mjs \
+            package/dist/index.d.ts \
+            package/dist/index.d.mts \
+            package/dist/api.js \
+            package/dist/api.mjs \
+            package/dist/api.d.ts \
+            package/dist/api.d.mts \
+            package/README.md \
+            package/LICENSE
+          do
+            if ! grep -qxF "$file" contents.txt; then
+              echo "::error::$file is missing from the published tarball"
+              missing=1
+            fi
+          done
+
+          # `files` is dist/README/LICENSE only - source must never ship.
+          if grep -qE '^package/(src|scripts|node_modules)/' contents.txt; then
+            echo "::error::the tarball contains files that should not be published"
+            missing=1
+          fi
+
+          exit "$missing"
+
+      - name: Resolve every declared export
+        # Installs the packed tarball into a throwaway project and imports each
+        # subpath the way a consumer would, so a broken `exports` map fails here
+        # rather than in someone else's app.
+        run: |
+          tarball="$(pwd)/$(ls -1 *.tgz | head -n 1)"
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install "$tarball" react react-dom >/dev/null
+          node --input-type=module -e "
+            const client = await import('geo-greet-visitor');
+            const api = await import('geo-greet-visitor/api');
+            if (typeof client.useGeoGreeting !== 'function') throw new Error('useGeoGreeting missing');
+            if (typeof client.GeoGreeting !== 'function') throw new Error('GeoGreeting missing');
+            if (typeof api.geoHandler !== 'function') throw new Error('geoHandler missing');
+            console.log('both entry points resolve');
+          "
+          node -e "
+            const client = require('geo-greet-visitor');
+            const api = require('geo-greet-visitor/api');
+            if (typeof client.buildGreeting !== 'function') throw new Error('cjs client broken');
+            if (typeof api.geoHandler !== 'function') throw new Error('cjs api broken');
+            console.log('both entry points require()');
+          "
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-tarball
+          path: "*.tgz"
+          if-no-files-found: error
+          retention-days: 14

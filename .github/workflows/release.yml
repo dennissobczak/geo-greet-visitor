@@ -1,0 +1,128 @@
+name: Release
+
+# Tag-driven. To cut a release:
+#
+#   npm version minor          # bumps package.json and creates the v* tag
+#   git push --follow-tags
+#
+# A tag containing a hyphen (v1.2.0-beta.1) publishes under the `next` dist-tag
+# and is marked as a prerelease on GitHub; everything else goes to `latest`.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run every check and `npm publish --dry-run`, publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Full CI matrix - a tag cannot be published on a build that was never green.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to npm
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # npm provenance (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - name: Resolve version and dist-tag
+        id: meta
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          name="$(node -p "require('./package.json').name")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+              exit 1
+            fi
+          fi
+
+          # 1.2.0-beta.1 -> prerelease -> `next`; 1.2.0 -> `latest`.
+          case "$version" in
+            *-*) echo "dist_tag=next" >> "$GITHUB_OUTPUT"
+                 echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
+                 echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Fail if this version is already on npm
+        run: |
+          name="${{ steps.meta.outputs.name }}"
+          version="${{ steps.meta.outputs.version }}"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::error::$name@$version is already published - bump the version first"
+            exit 1
+          fi
+          echo "$name@$version is free to publish"
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Publish
+        # `--provenance` signs the package with this workflow's OIDC identity, so
+        # npm shows a verified link back to the exact commit and run.
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            # No --provenance here: signing needs a real registry round-trip.
+            echo "Dry run - nothing will be published."
+            npm publish --dry-run --tag "${{ steps.meta.outputs.dist_tag }}"
+          else
+            npm publish --provenance --tag "${{ steps.meta.outputs.dist_tag }}"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Pack tarball for the GitHub release
+        if: github.event_name == 'push'
+        run: npm pack --pack-destination=.
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '--latest' }} \
+            ./*.tgz
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${{ steps.meta.outputs.name }}@${{ steps.meta.outputs.version }}"
+            echo
+            echo "- dist-tag: \`${{ steps.meta.outputs.dist_tag }}\`"
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- install: \`npm install ${{ steps.meta.outputs.name }}@${{ steps.meta.outputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

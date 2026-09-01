@@ -12,7 +12,10 @@ export default defineConfig([
     sourcemap: true,
     clean: true,
     external: ["react", "react-dom"],
-    treeshake: true,
+    // NOT treeshake: true. That option post-processes esbuild's output with
+    // rollup, which strips the leading directive the banner just added - so the
+    // client entry would ship without "use client". Consumers still tree-shake
+    // this entry via the package's `sideEffects: false`.
     banner: { js: '"use client";' },
   },
   {
