@@ -57,9 +57,12 @@ export function useGeoGreeting(options: GeoGreetingOptions = {}): GeoGreetingSta
   }, [endpoint]);
 
   return useMemo(() => {
+    // The endpoint answers with an empty country code for a visitor it cannot
+    // place - a private address in local development, or unallocated space -
+    // which is a successful response, not an error, and renders the fallback.
     const countryCode = data?.countryCode ?? "";
-    const country = data
-      ? localizeCountry(countryCode, data.country, locale)
+    const country = countryCode
+      ? localizeCountry(countryCode, data?.country || countryCode, locale)
       : fallback;
     const flag = countryFlag(countryCode) || fallbackFlag;
 

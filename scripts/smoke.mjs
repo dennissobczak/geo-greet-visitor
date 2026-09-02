@@ -3,9 +3,9 @@
  *
  * No test framework is configured, so this runs on plain `node`. It checks the
  * two published entry points in both module formats: that they load at all,
- * that the public surface documented in README.md is present, and that the pure
- * helpers behave. Nothing here touches the network - `geoHandler` is only
- * checked for shape, since exercising it would hit ip-api.com.
+ * that the public surface documented in README.md is present, and that the
+ * helpers behave. Country resolution is offline, so `geoHandler` is exercised
+ * for real here - nothing in this file touches the network.
  *
  * File names follow tsup's defaults for a package without `"type": "module"`:
  * CJS is `*.js`, ESM is `*.mjs`. They must stay in step with the `exports` map
@@ -122,14 +122,26 @@ const cjsApi = (() => {
   }
 })();
 
+const apiExports = [
+  "geoHandler",
+  "createGeoHandler",
+  "extractIp",
+  "countryFromIp",
+  "countryName",
+  "normalizeCountry",
+  "lookupIp",
+];
+
 for (const [label, mod] of [
   ["esm", esmApi],
   ["cjs", cjsApi],
 ]) {
-  check(`api ${label} exports geoHandler as a function`, () => {
-    assert.ok(!(mod instanceof Error), mod instanceof Error ? mod.message : "");
-    assert.equal(typeof mod.geoHandler, "function");
-  });
+  for (const name of apiExports) {
+    check(`api ${label} exports ${name} as a function`, () => {
+      assert.ok(!(mod instanceof Error), mod instanceof Error ? mod.message : "");
+      assert.equal(typeof mod[name], "function");
+    });
+  }
 }
 
 // --- the server/client boundary the two tsup configs exist to protect ------
@@ -206,6 +218,131 @@ check("buildGreeting collapses the gap left by an empty flag", () => {
     flag: "",
   });
   assert.equal(greeting, "Hello Poland");
+});
+
+// --- offline country resolution --------------------------------------------
+
+const api = esmApi instanceof Error ? {} : esmApi;
+const { geoHandler, createGeoHandler, countryFromIp, extractIp } = api;
+
+const get = (headers = {}) =>
+  new Request("https://example.test/api/geo", { headers });
+const body = async (handler, headers) => (await handler(get(headers))).json();
+
+check("extractIp prefers the platform header over x-forwarded-for", () => {
+  assert.equal(
+    extractIp(get({ "cf-connecting-ip": "8.8.8.8", "x-forwarded-for": "1.1.1.1, 9.9.9.9" })),
+    "8.8.8.8",
+  );
+  assert.equal(extractIp(get({ "x-forwarded-for": "1.1.1.1, 9.9.9.9" })), "1.1.1.1");
+  assert.equal(extractIp(get()), "127.0.0.1");
+});
+
+check("countryFromIp places IPv4, IPv6 and IPv4-mapped addresses", () => {
+  assert.equal(countryFromIp("8.8.8.8"), "US");
+  assert.equal(countryFromIp("1.1.1.1"), "AU");
+  assert.equal(countryFromIp("193.0.6.139"), "NL");
+  assert.equal(countryFromIp("::ffff:8.8.8.8"), "US");
+  assert.equal(countryFromIp("2001:4860:4860::8888"), "US");
+});
+
+check("countryFromIp returns null for addresses that belong to no country", () => {
+  for (const ip of [
+    "127.0.0.1",
+    "10.0.0.1",
+    "192.168.1.1",
+    "172.16.0.1",
+    "100.64.0.1",
+    "169.254.1.1",
+    "::1",
+    "fe80::1",
+    "fd00::1",
+    "not an ip",
+    "",
+  ]) {
+    assert.equal(countryFromIp(ip), null, `${ip} should not resolve`);
+  }
+});
+
+check("geoHandler resolves a public IP from the offline table", async () => {
+  const res = await geoHandler(get({ "x-forwarded-for": "8.8.8.8" }));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+
+  const data = await res.json();
+  assert.equal(data.countryCode, "US");
+  assert.equal(data.ip, "8.8.8.8");
+  assert.ok(data.country.length > 2, "country should be a name, not the code");
+  assert.equal(data.city, null);
+  assert.equal(data.region, null);
+});
+
+check("a platform country header wins over the IP table", async () => {
+  const data = await body(geoHandler, {
+    "cf-ipcountry": "PL",
+    "x-forwarded-for": "8.8.8.8",
+  });
+  assert.equal(data.countryCode, "PL");
+});
+
+check("placeholder country codes fall through to the table", async () => {
+  // Cloudflare sends XX when it cannot place the visitor, T1 for Tor.
+  for (const code of ["XX", "T1", "EU"]) {
+    const data = await body(geoHandler, {
+      "cf-ipcountry": code,
+      "x-forwarded-for": "8.8.8.8",
+    });
+    assert.equal(data.countryCode, "US", `${code} should not be taken as a country`);
+  }
+});
+
+check("a loopback visitor resolves to nothing, not an error", async () => {
+  const res = await geoHandler(get());
+  assert.equal(res.status, 200);
+
+  const data = await res.json();
+  assert.equal(data.countryCode, "");
+  assert.equal(data.country, "");
+  assert.equal(data.ip, "127.0.0.1");
+});
+
+check("defaultCountry fills in for an unplaceable visitor", async () => {
+  const data = await body(createGeoHandler({ defaultCountry: "DE" }));
+  assert.equal(data.countryCode, "DE");
+});
+
+check("resolve overrides the platform header and the table", async () => {
+  const handler = createGeoHandler({ resolve: () => "JP" });
+  const data = await body(handler, { "cf-ipcountry": "PL", "x-forwarded-for": "8.8.8.8" });
+  assert.equal(data.countryCode, "JP");
+});
+
+check("resolve returning null falls through to the rest", async () => {
+  const handler = createGeoHandler({ resolve: () => null });
+  const data = await body(handler, { "x-forwarded-for": "8.8.8.8" });
+  assert.equal(data.countryCode, "US");
+});
+
+check("resolve may be async", async () => {
+  const handler = createGeoHandler({ resolve: async () => "IT" });
+  assert.equal((await body(handler)).countryCode, "IT");
+});
+
+check("trustPlatformHeaders: false ignores the header", async () => {
+  const handler = createGeoHandler({ trustPlatformHeaders: false });
+  const data = await body(handler, { "cf-ipcountry": "PL", "x-forwarded-for": "8.8.8.8" });
+  assert.equal(data.countryCode, "US");
+});
+
+check("a throwing resolve is reported rather than swallowed", async () => {
+  const handler = createGeoHandler({
+    resolve: () => {
+      throw new Error("resolver exploded");
+    },
+  });
+  const res = await handler(get());
+  assert.equal(res.status, 500);
+  assert.equal((await res.json()).error, "resolver exploded");
 });
 
 // --- run -------------------------------------------------------------------

@@ -15,6 +15,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Table generator (scripts/build-geo-table.py)
+__pycache__/
+
 # Editor/OS
 .DS_Store
 .vscode/
