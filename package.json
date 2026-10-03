@@ -1,6 +1,6 @@
 {
   "name": "geo-greet-visitor",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Greet visitors by their country - offline IP-to-country lookup, localised country name and flag emoji, for React and any Web-standard server runtime",
   "keywords": [
     "react",
