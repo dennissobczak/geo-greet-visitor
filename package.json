@@ -16,6 +16,14 @@
   ],
   "license": "MIT",
   "author": "Dennis Sobczak",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dennissobczak/geo-greet-visitor.git"
+  },
+  "homepage": "https://github.com/dennissobczak/geo-greet-visitor#readme",
+  "bugs": {
+    "url": "https://github.com/dennissobczak/geo-greet-visitor/issues"
+  },
   "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
