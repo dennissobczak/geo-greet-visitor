@@ -44,8 +44,19 @@ export interface GeoHandlerOptions {
   trustPlatformHeaders?: boolean;
 }
 
+/**
+ * Caller-supplied loader for the browser-only case, where nothing rendered on
+ * the server can pass the data down. The package itself makes no network
+ * requests, so loading - typically a request to a route mounted with
+ * `geoHandler` - is the caller's code.
+ */
+export type GeoLoader = () => Promise<GeoData>;
+
 export interface GeoGreetingState {
-  /** Raw lookup result, or `null` while loading and after a failure. */
+  /**
+   * The `data` option, or what `load` resolved to. `null` while loading, after
+   * a failure, and when only `countryCode` was given.
+   */
   data: GeoData | null;
   /** Rendered greeting - always a usable string, even on failure. */
   greeting: string;
@@ -59,9 +70,24 @@ export interface GeoGreetingState {
   error: string | null;
 }
 
+/**
+ * Where the country comes from. Give one of `data`, `countryCode` or `load`;
+ * when several are set the first in that order wins. With none, the greeting
+ * renders its fallback.
+ */
 export interface GeoGreetingOptions {
-  /** Endpoint that returns `GeoData` JSON. Defaults to `"/api/geo"`. */
-  endpoint?: string;
+  /**
+   * Result of `getGeo` from `geo-greet-visitor/api`, resolved on the server and
+   * passed down. `null` renders the fallback.
+   */
+  data?: GeoData | null;
+  /** ISO 3166-1 alpha-2 code, when the country is already known some other way. */
+  countryCode?: string | null;
+  /**
+   * Loads the data in the browser. Runs once on mount - remount the component
+   * (change its `key`) to run it again - so an inline arrow is fine.
+   */
+  load?: GeoLoader;
   /**
    * Greeting template. Supported placeholders: `{country}`, `{countryCode}`,
    * `{flag}`. Defaults to `"Hello My Friend and greetings to {country} {flag}"`.
@@ -81,6 +107,6 @@ export interface GeoGreetingOptions {
 
 export interface GeoGreetingProps extends GeoGreetingOptions {
   className?: string;
-  /** Shown until the lookup resolves. Defaults to `"Hello My Friend"`. */
+  /** Shown until `load` resolves. Defaults to `"Hello My Friend"`. */
   loadingText?: string;
 }

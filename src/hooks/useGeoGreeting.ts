@@ -1,46 +1,61 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { countryFlag, localizeCountry } from "../flag";
 import { buildGreeting, DEFAULT_TEMPLATE } from "../greeting";
 import type { GeoData, GeoGreetingOptions, GeoGreetingState } from "../types";
 
 /**
- * Looks the visitor's country up through `endpoint` and renders `template`
- * with it. The greeting is never empty: before the lookup resolves - and after
- * it fails - it renders with `fallback` / `fallbackFlag`, so callers can show
- * it unconditionally and only consult `loading` / `error` if they want to.
+ * Renders `template` with the visitor's country, taken from `data` (resolved on
+ * the server with `getGeo`), a bare `countryCode`, or a caller-supplied `load`.
+ * The hook itself performs no I/O, which keeps the package free of network
+ * access.
+ *
+ * The greeting is never empty: before `load` resolves - and after it fails, or
+ * when no source was given - it renders with `fallback` / `fallbackFlag`, so
+ * callers can show it unconditionally and only consult `loading` / `error` if
+ * they want to.
  */
 export function useGeoGreeting(options: GeoGreetingOptions = {}): GeoGreetingState {
   const {
-    endpoint = "/api/geo",
+    data: given,
+    countryCode: givenCode,
+    load,
     template = DEFAULT_TEMPLATE,
     fallback = "the world",
     fallbackFlag = "🌍",
     locale,
   } = options;
 
-  const [data, setData] = useState<GeoData | null>(null);
-  const [loading, setLoading] = useState(true);
+  // `load` only matters when nothing more direct was passed in.
+  const shouldLoad = given === undefined && givenCode === undefined && load !== undefined;
+
+  const [loaded, setLoaded] = useState<GeoData | null>(null);
+  const [loading, setLoading] = useState(shouldLoad);
   const [error, setError] = useState<string | null>(null);
 
+  // Read through a ref so an inline `load` - a new function every render - does
+  // not re-run the effect, which would loop: resolve, set state, re-render.
+  const loadRef = useRef(load);
   useEffect(() => {
+    loadRef.current = load;
+  });
+
+  useEffect(() => {
+    if (!shouldLoad) return;
+
     let cancelled = false;
-    const controller = new AbortController();
 
-    async function fetchGeo() {
+    async function run() {
       try {
-        const res = await fetch(endpoint, { signal: controller.signal });
-        if (!res.ok) throw new Error(`Geo endpoint returned ${res.status}`);
-        const body: GeoData = await res.json();
-
+        const body = await loadRef.current!();
         if (cancelled) return;
-        setData(body);
+        setLoaded(body);
         setError(null);
       } catch (err) {
-        // An aborted request means the effect was torn down, not a failure.
+        // A rejection after unmount is nobody's concern any more.
         if (cancelled) return;
-        setData(null);
+        setLoaded(null);
         setError(err instanceof Error ? err.message : "Unknown error");
       } finally {
         if (!cancelled) setLoading(false);
@@ -48,22 +63,25 @@ export function useGeoGreeting(options: GeoGreetingOptions = {}): GeoGreetingSta
     }
 
     setLoading(true);
-    fetchGeo();
+    run();
 
     return () => {
       cancelled = true;
-      controller.abort();
     };
-  }, [endpoint]);
+  }, [shouldLoad]);
 
   return useMemo(() => {
-    // The endpoint answers with an empty country code for a visitor it cannot
-    // place - a private address in local development, or unallocated space -
-    // which is a successful response, not an error, and renders the fallback.
-    const countryCode = data?.countryCode ?? "";
-    const country = countryCode
-      ? localizeCountry(countryCode, data?.country || countryCode, locale)
-      : fallback;
+    const fromCode = given === undefined && givenCode !== undefined;
+    const data = given !== undefined ? given : fromCode ? null : loaded;
+
+    // An empty country code - a private address in local development, or
+    // unallocated space - is a successful answer, not an error, and renders
+    // the fallback.
+    const countryCode = ((fromCode ? givenCode : data?.countryCode) ?? "").trim().toUpperCase();
+
+    // `getGeo` supplies an English name; a bare code has none, so derive one.
+    const englishName = data?.country || localizeCountry(countryCode, countryCode, "en");
+    const country = countryCode ? localizeCountry(countryCode, englishName, locale) : fallback;
     const flag = countryFlag(countryCode) || fallbackFlag;
 
     return {
@@ -72,8 +90,8 @@ export function useGeoGreeting(options: GeoGreetingOptions = {}): GeoGreetingSta
       countryCode,
       flag,
       greeting: buildGreeting(template, { country, countryCode, flag }),
-      loading,
-      error,
+      loading: shouldLoad && loading,
+      error: shouldLoad ? error : null,
     };
-  }, [data, loading, error, template, fallback, fallbackFlag, locale]);
+  }, [given, givenCode, loaded, shouldLoad, loading, error, template, fallback, fallbackFlag, locale]);
 }

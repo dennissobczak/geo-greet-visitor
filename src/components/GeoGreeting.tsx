@@ -6,8 +6,8 @@ import type { GeoGreetingProps } from "../types";
 
 /**
  * Renders the greeting in a `<span>`. `aria-live` is set so screen readers
- * announce the country once the lookup resolves rather than only the
- * placeholder text.
+ * announce the country once `load` resolves rather than only the placeholder
+ * text.
  */
 export function GeoGreeting({
   className,

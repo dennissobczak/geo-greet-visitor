@@ -10,4 +10,5 @@ export type {
   GeoGreetingState,
   GeoGreetingOptions,
   GeoGreetingProps,
+  GeoLoader,
 } from "./types";

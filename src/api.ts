@@ -91,6 +91,52 @@ export async function lookupIp(ip: string): Promise<GeoData> {
 }
 
 /**
+ * Resolves the visitor behind a request to `GeoData`, in the order described on
+ * `resolveCountry`. This is the lookup without the HTTP response around it, for
+ * rendering the greeting on the server and handing the result to the client
+ * component as a prop.
+ *
+ * Takes a `Request`, or just its `Headers` - which is what a Next.js server
+ * component gets from `headers()`. A `resolve` callback then receives a
+ * synthetic request carrying those headers.
+ *
+ * An unplaceable visitor resolves with empty `country` / `countryCode`; only a
+ * throwing `resolve` rejects.
+ *
+ * @example
+ * // app/page.tsx (server component)
+ * import { headers } from "next/headers";
+ * import { getGeo } from "geo-greet-visitor/api";
+ *
+ * const geo = await getGeo(await headers());
+ * return <GeoGreeting data={geo} />;
+ */
+export async function getGeo(
+  source: Request | Headers,
+  options: GeoHandlerOptions = {},
+): Promise<GeoData> {
+  // Duck-typed rather than `instanceof Request`: polyfilled and framework
+  // request classes are not always the global one.
+  const req =
+    typeof (source as Request).url === "string"
+      ? (source as Request)
+      : new Request("http://localhost/", { headers: source as Headers });
+
+  const ip = extractIp(req);
+  const countryCode = await resolveCountry(req, ip, options);
+
+  // An unresolved country is not an error: the client renders its fallback,
+  // which is what local development and unallocated space should look like.
+  return {
+    country: countryCode ? countryName(countryCode) : "",
+    countryCode: countryCode ?? "",
+    city: null,
+    region: null,
+    ip,
+  };
+}
+
+/**
  * Builds a route handler returning `GeoData` for the calling visitor. Takes a
  * plain `Request`, so it works in any Web-standard runtime; in Next.js the App
  * Router's `NextRequest` satisfies it.
@@ -108,28 +154,14 @@ export function createGeoHandler(
 ): (req: Request) => Promise<Response> {
   return async function handler(req: Request): Promise<Response> {
     const headers = { "Cache-Control": "no-store" };
-    const ip = extractIp(req);
 
-    let countryCode: string | null;
     try {
-      countryCode = await resolveCountry(req, ip, options);
+      return Response.json(await getGeo(req, options), { headers });
     } catch (err) {
       // Only a caller-supplied `resolve` can throw - the table cannot.
       const message = err instanceof Error ? err.message : "Country lookup failed";
       return Response.json({ error: message }, { status: 500, headers });
     }
-
-    // An unresolved country is not an error: the client renders its fallback,
-    // which is what local development and unallocated space should look like.
-    const data: GeoData = {
-      country: countryCode ? countryName(countryCode) : "",
-      countryCode: countryCode ?? "",
-      city: null,
-      region: null,
-      ip,
-    };
-
-    return Response.json(data, { headers });
   };
 }
 

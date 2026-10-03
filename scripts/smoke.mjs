@@ -130,6 +130,7 @@ const apiExports = [
   "countryName",
   "normalizeCountry",
   "lookupIp",
+  "getGeo",
 ];
 
 for (const [label, mod] of [
@@ -168,6 +169,21 @@ for (const file of ["index.js", "index.mjs"]) {
       USE_CLIENT,
       `dist/${file} must start with "use client" for bundlers to honour it`,
     );
+  });
+}
+
+// --- no network access -----------------------------------------------------
+
+// Supply-chain scanners (socket.dev) flag any package that can reach the
+// network. Neither entry needs to: the server resolves offline and the client
+// takes its data as props or from a caller-supplied `load`.
+const NETWORK_APIS = /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\s*\(|\bnew\s+(XMLHttpRequest|WebSocket|EventSource)\b|require\(["'](node:)?(https?|net|tls|dgram|dns)["']\)|from\s*["'](node:)?(https?|net|tls|dgram|dns)["']/;
+
+for (const file of ["index.js", "index.mjs", "api.js", "api.mjs"]) {
+  check(`dist/${file} makes no network calls`, async () => {
+    const source = await readFile(path.join(dist, file), "utf8");
+    const hit = source.match(NETWORK_APIS);
+    assert.equal(hit, null, `dist/${file} references ${hit?.[0]}`);
   });
 }
 
@@ -223,7 +239,7 @@ check("buildGreeting collapses the gap left by an empty flag", () => {
 // --- offline country resolution --------------------------------------------
 
 const api = esmApi instanceof Error ? {} : esmApi;
-const { geoHandler, createGeoHandler, countryFromIp, extractIp } = api;
+const { geoHandler, createGeoHandler, countryFromIp, extractIp, getGeo } = api;
 
 const get = (headers = {}) =>
   new Request("https://example.test/api/geo", { headers });
@@ -332,6 +348,34 @@ check("trustPlatformHeaders: false ignores the header", async () => {
   const handler = createGeoHandler({ trustPlatformHeaders: false });
   const data = await body(handler, { "cf-ipcountry": "PL", "x-forwarded-for": "8.8.8.8" });
   assert.equal(data.countryCode, "US");
+});
+
+check("getGeo resolves a Request", async () => {
+  const data = await getGeo(get({ "x-forwarded-for": "8.8.8.8" }));
+  assert.equal(data.countryCode, "US");
+  assert.equal(data.ip, "8.8.8.8");
+});
+
+check("getGeo accepts bare Headers, as from Next's headers()", async () => {
+  const data = await getGeo(new Headers({ "cf-ipcountry": "PL", "x-real-ip": "8.8.8.8" }));
+  assert.equal(data.countryCode, "PL");
+  assert.equal(data.ip, "8.8.8.8");
+});
+
+check("getGeo takes the handler options", async () => {
+  const data = await getGeo(new Headers(), { defaultCountry: "DE" });
+  assert.equal(data.countryCode, "DE");
+});
+
+check("getGeo rejects when resolve throws", async () => {
+  await assert.rejects(
+    getGeo(new Headers(), {
+      resolve: () => {
+        throw new Error("resolver exploded");
+      },
+    }),
+    /resolver exploded/,
+  );
 });
 
 check("a throwing resolve is reported rather than swallowed", async () => {
